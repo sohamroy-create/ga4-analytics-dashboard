@@ -26,10 +26,20 @@ interface Message {
   timestamp: Date;
 }
 
+interface ConversationContext {
+  lastQuery: string;
+  lastIntent: string;
+  lastMetrics: string[];
+  lastDimensions: string[];
+  lastDateRange: { start: string; end: string };
+  lastFilters?: Record<string, unknown>;
+}
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [conversationContext, setConversationContext] = useState<ConversationContext | null>(null);
   const [clarificationState, setClarificationState] = useState<{
     originalQuery: string;
     answers: Record<string, string>;
@@ -61,7 +71,7 @@ export default function Home() {
       const res = await fetch("/api/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, skipClarification }),
+        body: JSON.stringify({ query, skipClarification, conversationContext }),
       });
 
       const result = await res.json();
@@ -103,6 +113,11 @@ export default function Home() {
         };
         setMessages((prev) => [...prev, assistantMsg]);
         setClarificationState(null);
+
+        // Save conversation context for follow-up queries
+        if (result.context) {
+          setConversationContext(result.context);
+        }
       }
     } catch (err) {
       console.error("Query error:", err);

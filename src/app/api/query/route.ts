@@ -1,6 +1,15 @@
 import { NextResponse } from "next/server";
 import { runGA4Report, runFunnelReport, runPathAnalysis, getPropertyMetadata } from "@/lib/ga4";
-import { parseQuery, buildSummary, checkClarification } from "@/lib/queryParser";
+import { parseQuery, buildSummary, checkClarification, isFollowUp, mergeWithContext } from "@/lib/queryParser";
+
+interface ConversationContext {
+  lastQuery: string;
+  lastIntent: string;
+  lastMetrics: string[];
+  lastDimensions: string[];
+  lastDateRange: { start: string; end: string };
+  lastFilters?: Record<string, unknown>;
+}
 
 function formatRows(rows: Record<string, string | number>[]) {
   return rows.map((row) => {
@@ -44,7 +53,8 @@ function getComparisonRange(startDate: string, endDate: string): { start: string
 
 export async function POST(request: Request) {
   try {
-    const { query, skipClarification } = await request.json();
+    const { query, skipClarification, conversationContext } = await request.json();
+    const ctx = conversationContext as ConversationContext | null;
 
     if (!query || typeof query !== "string") {
       return NextResponse.json({ error: "Query is required" }, { status: 400 });
@@ -57,9 +67,15 @@ export async function POST(request: Request) {
       );
     }
 
+    // Step 0: Check if this is a follow-up query that references previous context
+    let effectiveQuery = query;
+    if (ctx && isFollowUp(query)) {
+      effectiveQuery = mergeWithContext(query, ctx);
+    }
+
     // Step 1: Check if we need to ask clarifying questions
     if (!skipClarification) {
-      const clarification = checkClarification(query);
+      const clarification = checkClarification(effectiveQuery);
       if (clarification) {
         return NextResponse.json({
           type: "clarification",
@@ -72,7 +88,7 @@ export async function POST(request: Request) {
     // Step 2: Parse and execute the query (with metadata awareness)
     let metadata;
     try { metadata = await getPropertyMetadata(); } catch { metadata = null; }
-    const parsed = parseQuery(query, metadata);
+    const parsed = parseQuery(effectiveQuery, metadata);
 
     // ── Handle funnel reports ──
     if (parsed.reportType === "funnel" && parsed.funnelSteps) {
@@ -93,6 +109,7 @@ export async function POST(request: Request) {
         type: "data", summary: summaryText,
         data: { rows: funnelRows, dimensions: ["step"], metrics: ["users", "conversionRate", "dropoff"] },
         chartType: "funnel",
+        context: { lastQuery: effectiveQuery, lastIntent: "funnel", lastMetrics: ["totalUsers"], lastDimensions: ["eventName"], lastDateRange: { start: parsed.params.startDate, end: parsed.params.endDate } },
       });
     }
 
@@ -110,6 +127,7 @@ export async function POST(request: Request) {
         type: "data", summary: summaryText,
         data: { rows: formattedPaths, dimensions: ["pagePath", "eventName"], metrics: ["eventCount", "totalUsers"] },
         chartType: "table",
+        context: { lastQuery: effectiveQuery, lastIntent: "path", lastMetrics: ["eventCount", "totalUsers"], lastDimensions: ["pagePath", "eventName"], lastDateRange: { start: parsed.params.startDate, end: parsed.params.endDate } },
       });
     }
 
@@ -159,6 +177,16 @@ export async function POST(request: Request) {
 
     const chartData = formatRows(rows);
 
+    // Build conversation context for follow-up queries
+    const newContext: ConversationContext = {
+      lastQuery: effectiveQuery,
+      lastIntent: parsed.summary_template,
+      lastMetrics: parsed.params.metrics,
+      lastDimensions: parsed.params.dimensions,
+      lastDateRange: { start: parsed.params.startDate, end: parsed.params.endDate },
+      lastFilters: parsed.params.dimensionFilter,
+    };
+
     const response: Record<string, unknown> = {
       type: "data",
       summary,
@@ -168,6 +196,7 @@ export async function POST(request: Request) {
         metrics: parsed.params.metrics,
       },
       chartType: parsed.chartType,
+      context: newContext,
     };
 
     if (geoData) {

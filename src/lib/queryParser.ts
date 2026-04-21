@@ -101,18 +101,16 @@ function detectCompanyInQuery(query: string): string | null {
 }
 
 export function checkClarification(query: string): ClarificationResult | null {
+  const lower = query.toLowerCase();
   const intent = detectIntent(query);
   const hasTimeline = hasExplicitTimeline(query);
   const hasScope = hasExplicitScope(query);
+  const hasGeo = hasExplicitGeo(query);
   const detectedCompany = detectCompanyInQuery(query);
 
   const questions: ClarificationQuestion[] = [];
 
-  // ONLY ask clarification for truly ambiguous queries:
-  // 1. Unknown intent with no scope and no timeline → ask what they want
-  // 2. job_apply without a specific company → ask which company
-
-  // If the query is completely vague (no intent, no scope, no timeline)
+  // 1. Completely vague query (no intent, no scope, no timeline)
   if (intent === "unknown" && !hasScope && !hasTimeline) {
     questions.push({
       id: "scope",
@@ -134,8 +132,8 @@ export function checkClarification(query: string): ClarificationResult | null {
     };
   }
 
-  // Job apply specific: ask WHICH job apply they mean (only when no company specified and no "by company" breakdown requested)
-  if (intent === "job_apply" && !detectedCompany && !query.toLowerCase().match(/by\s*company|broken?\s*down.*company|per\s*company|each\s*company|all.*combined|all.*job/)) {
+  // 2. Job apply specific: ask WHICH job apply they mean
+  if (intent === "job_apply" && !detectedCompany && !lower.match(/by\s*company|broken?\s*down.*company|per\s*company|each\s*company|all.*combined|all.*job/)) {
     questions.push({
       id: "job_apply_type",
       text: "Which job apply data do you want to see? We track applies across multiple companies.",
@@ -149,16 +147,188 @@ export function checkClarification(query: string): ClarificationResult | null {
         { label: "Unknown company applies", value: "job_apply_unknown events" },
       ],
     });
+
+    // Also ask timeline if missing
+    if (!hasTimeline) {
+      questions.push({
+        id: "timeline",
+        text: "What time period should I look at?",
+        options: [
+          { label: "Last 7 days", value: "last 7 days" },
+          { label: "Last 14 days", value: "last 14 days" },
+          { label: "Last 30 days", value: "last 30 days" },
+          { label: "Last 90 days", value: "last 90 days" },
+          { label: "This year (YTD)", value: "this year" },
+        ],
+      });
+    }
+
     return {
       type: "clarification",
-      message: "We track job applies across multiple companies. Which would you like to see?",
+      message: "We track job applies across multiple companies. Let me narrow this down:",
       questions,
     };
   }
 
-  // For all other queries with a clear intent, just run the query directly.
-  // The parser will use sensible defaults (last 30 days if no timeline, etc.)
+  // 3. "Traffic" or "engagement" with geo dimension but no specific metrics requested
+  //    e.g., "breakdown traffic based on geographies" — ask WHICH metric
+  if ((intent === "traffic" || intent === "engagement") && hasGeo && !lower.match(/users?|sessions?|page\s*views?|bounce|engagement\s*rate|duration|conversion/)) {
+    const metricOptions = intent === "traffic"
+      ? [
+          { label: "Users & Sessions", value: "users and sessions" },
+          { label: "Page Views", value: "page views" },
+          { label: "Bounce Rate", value: "bounce rate" },
+          { label: "All traffic metrics", value: "users, sessions, page views, and bounce rate" },
+        ]
+      : [
+          { label: "Engagement Rate", value: "engagement rate" },
+          { label: "Bounce Rate", value: "bounce rate" },
+          { label: "Session Duration", value: "session duration" },
+          { label: "All engagement metrics", value: "engagement rate, bounce rate, and session duration" },
+        ];
+    questions.push({
+      id: "metrics",
+      text: `Which ${intent} metrics do you want broken down by geography?`,
+      options: metricOptions,
+    });
+
+    if (!hasTimeline) {
+      questions.push({
+        id: "timeline",
+        text: "What time period?",
+        options: [
+          { label: "Last 7 days", value: "last 7 days" },
+          { label: "Last 30 days", value: "last 30 days" },
+          { label: "Last 90 days", value: "last 90 days" },
+        ],
+      });
+    }
+
+    return {
+      type: "clarification",
+      message: `I can break down ${intent} by geography. Let me clarify what you need:`,
+      questions,
+    };
+  }
+
+  // 4. Clear intent but no timeline — still ask for timeline on broad queries
+  //    (only for intents where timeline matters and query doesn't have one)
+  if (!hasTimeline && (intent === "unknown" || (intent === "traffic" && !hasScope) || (intent === "engagement" && !hasScope))) {
+    questions.push({
+      id: "timeline",
+      text: "What time period should I look at?",
+      options: [
+        { label: "Last 7 days", value: "last 7 days" },
+        { label: "Last 14 days", value: "last 14 days" },
+        { label: "Last 30 days", value: "last 30 days" },
+        { label: "Last 90 days", value: "last 90 days" },
+        { label: "This year (YTD)", value: "this year" },
+      ],
+    });
+    return {
+      type: "clarification",
+      message: "What time period should I look at?",
+      questions,
+    };
+  }
+
   return null;
+}
+
+// ─── Conversation continuity ───
+
+interface ConversationContext {
+  lastQuery: string;
+  lastIntent: string;
+  lastMetrics: string[];
+  lastDimensions: string[];
+  lastDateRange: { start: string; end: string };
+  lastFilters?: Record<string, unknown>;
+}
+
+/** Detect if a query is a follow-up that references previous context */
+export function isFollowUp(query: string): boolean {
+  const lower = query.toLowerCase();
+  // References to previous data: "that", "those", "it", "this", "the same", "break down", "break it down"
+  const followUpPatterns = [
+    /\b(that|those|this|it|the same|these results?|the data|the above|previous)\b/,
+    /\bbreak\s*(it|that|this|them)?\s*down\b/,
+    /\bnow\s+(show|give|break|filter|sort|compare|add)\b/,
+    /\bcan\s+you\s+(also|break|show|filter|add|compare|give)\b/,
+    /\binstead\b/,
+    /\bwhat\s+about\b/,
+    /\bhow\s+about\b/,
+    /\bsame\s+(but|for|with|data|query|thing)\b/,
+    /\balso\s+(show|include|add|break)\b/,
+  ];
+  return followUpPatterns.some((p) => p.test(lower));
+}
+
+/** Merge a follow-up query with previous context to build a complete query */
+export function mergeWithContext(query: string, ctx: ConversationContext): string {
+  const lower = query.toLowerCase();
+
+  // Detect what modification the user wants
+  const wantsGeo = /geo|countr|region|city|location|geography|geograph/i.test(lower);
+  const wantsCompare = /compar|vs|versus|week.over|month.over/i.test(lower);
+  const wantsDevices = /device|mobile|desktop|browser/i.test(lower);
+  const wantsSources = /source|referr|channel|medium/i.test(lower);
+  const wantsTimeline = hasExplicitTimeline(query);
+
+  // Build a merged query from context + new modifier
+  const parts: string[] = [];
+
+  // Carry over the base intent from context
+  const intentMap: Record<string, string> = {
+    "job_apply_trend": "job apply",
+    "job_apply_breakdown": "job apply by company",
+    "job_apply_company": "job apply",
+    "traffic_overview": "traffic",
+    "engagement_rate": "engagement",
+    "top_pages": "top pages",
+    "sources": "traffic sources",
+    "geo": "geographic data",
+    "devices": "device data",
+    "events": "events",
+    "engagement": "user engagement",
+    "funnel": "funnel",
+    "path": "path analysis",
+    "chatbot": "chatbot interactions",
+    "form_events": "form submissions",
+    "sign_in": "sign-in clicks",
+  };
+
+  parts.push(intentMap[ctx.lastIntent] || ctx.lastIntent);
+
+  // Add the new dimension/modification
+  if (wantsGeo) parts.push("broken down by country");
+  if (wantsCompare) parts.push("compare with previous period");
+  if (wantsDevices) parts.push("by device");
+  if (wantsSources) parts.push("by source");
+
+  // Carry timeline from context or new query
+  if (wantsTimeline) {
+    // Use the new timeline from the follow-up query
+    parts.push(query.replace(/\b(break|it|that|those|this|them|down|can you|also|now|show|give)\b/gi, "").trim());
+  } else {
+    // Use the timeline from previous context
+    parts.push(`from ${ctx.lastDateRange.start} to ${ctx.lastDateRange.end}`);
+  }
+
+  // Carry over filters (like specific event names)
+  if (ctx.lastFilters) {
+    const filter = ctx.lastFilters as Record<string, Record<string, Record<string, string>>>;
+    if (filter?.filter?.fieldName === "eventName" && filter?.filter?.stringFilter?.value) {
+      const eventName = filter.filter.stringFilter.value;
+      if (eventName.startsWith("job_apply")) {
+        parts.push(`for ${eventName} event`);
+      }
+    }
+  }
+
+  const merged = parts.join(", ");
+  console.log(`[Context merge] "${query}" + context → "${merged}"`);
+  return merged;
 }
 
 // ─── Date parsing ───
