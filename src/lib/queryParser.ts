@@ -105,6 +105,10 @@ function detectCompanyInQuery(query: string): string | null {
 
 export function checkClarification(query: string): ClarificationResult | null {
   const lower = query.toLowerCase();
+
+  // Never clarify funnel/path queries — they have their own parsing
+  if (lower.match(/funnel|conversion\s*funnel|user\s*journey|user\s*flow|path\s*explor|path\s*analys/)) return null;
+
   const intent = detectIntent(query);
   const hasTimeline = hasExplicitTimeline(query);
   const hasScope = hasExplicitScope(query);
