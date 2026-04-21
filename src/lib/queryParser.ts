@@ -317,13 +317,17 @@ export function mergeWithContext(query: string, ctx: ConversationContext): strin
 
   // Carry over filters (like specific event names)
   if (ctx.lastFilters) {
-    const filter = ctx.lastFilters as Record<string, Record<string, Record<string, string>>>;
-    if (filter?.filter?.fieldName === "eventName" && filter?.filter?.stringFilter?.value) {
-      const eventName = filter.filter.stringFilter.value;
-      if (eventName.startsWith("job_apply")) {
-        parts.push(`for ${eventName} event`);
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const filter = ctx.lastFilters as any;
+      const fieldName = filter?.filter?.fieldName;
+      const eventValue = filter?.filter?.stringFilter?.value;
+      if (fieldName === "eventName" && typeof eventValue === "string") {
+        if (eventValue.startsWith("job_apply")) {
+          parts.push(`for ${eventValue} event`);
+        }
       }
-    }
+    } catch { /* ignore filter parsing errors */ }
   }
 
   const merged = parts.join(", ");
