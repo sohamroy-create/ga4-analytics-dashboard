@@ -94,7 +94,7 @@ export default function Home() {
         // Normal data response
         const assistantMsg: Message = {
           role: "assistant",
-          content: result.summary,
+          content: result.summary || "Here are your results:",
           data: result.data,
           chartType: result.chartType,
           geoData: result.geoData,
@@ -281,11 +281,14 @@ export default function Home() {
 
           {loading && (
             <div className="animate-fade-in">
-              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 max-w-[100px]">
-                <div className="flex gap-1.5">
-                  <div className="w-2 h-2 rounded-full bg-gray-400 typing-dot"></div>
-                  <div className="w-2 h-2 rounded-full bg-gray-400 typing-dot"></div>
-                  <div className="w-2 h-2 rounded-full bg-gray-400 typing-dot"></div>
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 max-w-xs">
+                <div className="flex items-center gap-3">
+                  <div className="flex gap-1.5">
+                    <div className="w-2 h-2 rounded-full bg-indigo-400 typing-dot"></div>
+                    <div className="w-2 h-2 rounded-full bg-indigo-400 typing-dot"></div>
+                    <div className="w-2 h-2 rounded-full bg-indigo-400 typing-dot"></div>
+                  </div>
+                  <span className="text-sm text-gray-500">Analyzing your data...</span>
                 </div>
               </div>
             </div>

@@ -45,20 +45,55 @@ function hasExplicitScope(query: string): boolean {
   return /top pages?|sources?|devices?|events?|landing|browser|mobile|desktop|channels?|referr/.test(lower);
 }
 
+// ─── Known GA4 events in this property ───
+const TOP_JOB_APPLY_COMPANIES = [
+  "LHH_US", "Wells_Fargo", "KB_Transportation", "Maxion_Research",
+  "Basements_Plus", "Apex_Focus_Group_LLC", "Yacht", "Christus_Health",
+  "Amrize", "Ashley_Furniture_Industries_LL", "Naeve_Inc", "Outlier_AI",
+  "RLDG", "Company_Confidential", "DoorDash", "Honeywell_AEROSPACE",
+];
+
+const KNOWN_EVENTS = [
+  "page_view", "job_apply", "job_apply_", "session_start", "first_visit",
+  "user_engagement", "scroll", "view_search_results", "click",
+  "job_apply_unknown", "form_start", "chatbot_interaction",
+  "k&b_submissions", "sign_in_click", "blog_scroll_60",
+];
+
 function detectIntent(query: string): string {
   const lower = query.toLowerCase();
+  // Job apply specific (before generic events)
+  if (lower.match(/job.?appl|apply|applies|application/)) return "job_apply";
   if (lower.match(/engag|bounce|session duration|retention|drop|increas|decreas|improv|worsen|chang/)) return "engagement";
   if (lower.match(/traffic|visit|overview|how.*doing|dashboard|summary|performance/)) return "traffic";
   if (lower.match(/top pages?|popular pages?|most visited|best pages?|page views/)) return "top_pages";
   if (lower.match(/source|referr|channel|where.*come|acquisition|medium/)) return "sources";
   if (lower.match(/countr|geo|location|region|city|where.*from/)) return "geo";
   if (lower.match(/device|mobile|desktop|tablet|browser/)) return "devices";
-  if (lower.match(/event|conversion|appl|job_apply|click|chatbot|interact/)) return "events";
+  if (lower.match(/event|conversion|click|chatbot|interact/)) return "events";
   if (lower.match(/users?|active/)) return "users";
   if (lower.match(/landing|entry|first page/)) return "landing";
   if (lower.match(/search|query|queries|what.*search/)) return "search";
   if (lower.match(/week|weekly/)) return "weekly";
   return "unknown";
+}
+
+function detectCompanyInQuery(query: string): string | null {
+  const lower = query.toLowerCase().replace(/[^a-z0-9\s]/g, "");
+  const companyMap: Record<string, string> = {
+    "lhh": "LHH_US", "wells fargo": "Wells_Fargo", "kb transportation": "KB_Transportation",
+    "maxion": "Maxion_Research", "basements plus": "Basements_Plus",
+    "apex": "Apex_Focus_Group_LLC", "yacht": "Yacht", "christus": "Christus_Health",
+    "amrize": "Amrize", "ashley": "Ashley_Furniture_Industries_LL",
+    "doordash": "DoorDash", "honeywell": "Honeywell_AEROSPACE",
+    "grubhub": "Grubhub", "verizon": "Verizon", "outlier": "Outlier_AI",
+    "spectrum": "SPECTRUM", "pnc": "PNC_Financial_Services_Group",
+    "optum": "Optum", "globe life": "Globe_Life",
+  };
+  for (const [keyword, eventSuffix] of Object.entries(companyMap)) {
+    if (lower.includes(keyword)) return eventSuffix;
+  }
+  return null;
 }
 
 export function checkClarification(query: string): ClarificationResult | null {
@@ -67,6 +102,7 @@ export function checkClarification(query: string): ClarificationResult | null {
   const hasTimeline = hasExplicitTimeline(query);
   const hasGeo = hasExplicitGeo(query);
   const hasScope = hasExplicitScope(query);
+  const detectedCompany = detectCompanyInQuery(query);
 
   const questions: ClarificationQuestion[] = [];
 
@@ -78,10 +114,28 @@ export function checkClarification(query: string): ClarificationResult | null {
       options: [
         { label: "Traffic Overview", value: "traffic overview" },
         { label: "Engagement & Bounce Rate", value: "engagement metrics" },
+        { label: "Job Apply Metrics", value: "job apply rate" },
         { label: "Top Pages", value: "top pages" },
         { label: "Traffic Sources", value: "traffic sources" },
         { label: "Geographic Breakdown", value: "geographic breakdown" },
         { label: "Events & Conversions", value: "events and conversions" },
+      ],
+    });
+  }
+
+  // Job apply specific: ask WHICH job apply they mean
+  if (intent === "job_apply" && !detectedCompany) {
+    questions.push({
+      id: "job_apply_type",
+      text: "Which job apply data do you want to see? We track applies across multiple companies.",
+      options: [
+        { label: "All job applies (combined)", value: "all job_apply events combined" },
+        { label: "Breakdown by company", value: "job_apply broken down by company" },
+        { label: "LHH US", value: "job_apply for LHH_US" },
+        { label: "Wells Fargo", value: "job_apply for Wells_Fargo" },
+        { label: "KB Transportation", value: "job_apply for KB_Transportation" },
+        { label: "Maxion Research", value: "job_apply for Maxion_Research" },
+        { label: "Unknown company applies", value: "job_apply_unknown events" },
       ],
     });
   }
@@ -102,7 +156,7 @@ export function checkClarification(query: string): ClarificationResult | null {
   }
 
   // For engagement/comparison queries, ask about geo if not specified
-  if ((intent === "engagement" || intent === "traffic" || intent === "unknown") && !hasGeo && !hasScope) {
+  if ((intent === "engagement" || intent === "traffic" || intent === "job_apply" || intent === "unknown") && !hasGeo && !hasScope) {
     questions.push({
       id: "geo",
       text: "Should I break this down by geography?",
@@ -114,8 +168,8 @@ export function checkClarification(query: string): ClarificationResult | null {
     });
   }
 
-  // For engagement with comparison keywords
-  if (intent === "engagement" && lower.match(/drop|increas|decreas|improv|worsen|chang|compar/)) {
+  // For engagement/job_apply with comparison keywords
+  if ((intent === "engagement" || intent === "job_apply") && lower.match(/drop|increas|decreas|improv|worsen|chang|compar|trend/)) {
     if (!questions.find((q) => q.id === "timeline")) {
       questions.push({
         id: "compare",
@@ -131,7 +185,12 @@ export function checkClarification(query: string): ClarificationResult | null {
 
   if (questions.length === 0) return null;
 
-  const intentLabel = intent !== "unknown" ? intent.replace("_", " ") : "analytics";
+  const intentLabels: Record<string, string> = {
+    job_apply: "job apply", engagement: "engagement", traffic: "traffic",
+    top_pages: "top pages", sources: "sources", geo: "geographic",
+    devices: "device", events: "events",
+  };
+  const intentLabel = intentLabels[intent] || "analytics";
   return {
     type: "clarification",
     message: `I'd like to give you the most useful ${intentLabel} data. Let me ask a few quick questions:`,
@@ -186,6 +245,73 @@ export function parseQuery(query: string): ParsedQuery {
 
   const wantsComparison = !!lower.match(/compar|vs|versus|drop|increas|decreas|chang|improv|worsen/);
   const wantsGeoBreakdown = !!lower.match(/by\s*(country|countries|city|cities|geo|region|geography)|broken?\s*down.*geo|globally/);
+
+  // ── JOB APPLY ──
+  if (lower.match(/job.?appl|apply|applies|application/) && !lower.match(/engag|bounce|traffic|overview/)) {
+    const company = detectCompanyInQuery(query);
+    const wantsByCompany = !!lower.match(/by\s*company|broken?\s*down.*company|per\s*company|each\s*company/);
+
+    if (wantsByCompany) {
+      // Show all job_apply events broken down by company
+      return {
+        params: {
+          startDate: dateRange.start,
+          endDate: dateRange.end,
+          dimensions: ["eventName"],
+          metrics: ["eventCount", "totalUsers"],
+          orderBy: "eventCount",
+          orderDesc: true,
+          limit: 30,
+          dimensionFilter: {
+            filter: { fieldName: "eventName", stringFilter: { matchType: "BEGINS_WITH", value: "job_apply" } },
+          },
+        },
+        summary_template: "job_apply_breakdown",
+        chartType: "table",
+        comparison: wantsComparison,
+      };
+    }
+
+    if (company) {
+      // Specific company job apply over time
+      return {
+        params: {
+          startDate: dateRange.start,
+          endDate: dateRange.end,
+          dimensions: ["date"],
+          metrics: ["eventCount", "totalUsers"],
+          orderBy: "date",
+          orderDesc: false,
+          dimensionFilter: {
+            filter: { fieldName: "eventName", stringFilter: { matchType: "EXACT", value: `job_apply_${company}` } },
+          },
+        },
+        summary_template: "job_apply_company",
+        chartType: "line",
+        comparison: wantsComparison,
+      };
+    }
+
+    // Aggregate job_apply (all combined) over time
+    return {
+      params: {
+        startDate: dateRange.start,
+        endDate: dateRange.end,
+        dimensions: wantsGeoBreakdown ? ["country"] : ["date"],
+        metrics: ["eventCount", "totalUsers"],
+        orderBy: wantsGeoBreakdown ? "eventCount" : "date",
+        orderDesc: wantsGeoBreakdown,
+        limit: wantsGeoBreakdown ? 20 : undefined,
+        dimensionFilter: {
+          filter: { fieldName: "eventName", stringFilter: { matchType: "EXACT", value: "job_apply" } },
+        },
+      },
+      summary_template: "job_apply_trend",
+      chartType: wantsGeoBreakdown ? "bar" : "line",
+      comparison: wantsComparison,
+      geoBreakdown: wantsGeoBreakdown && !lower.match(/by\s*(country|countries|city|cities|geo|region)/),
+    };
+  }
 
   // ── ENGAGEMENT (explicit engagement queries) ──
   if (lower.match(/engag|bounce\s*rate|session\s*duration|retention|drop.*engag|engag.*drop/)) {
@@ -295,8 +421,69 @@ export function parseQuery(query: string): ParsedQuery {
     };
   }
 
-  // ── EVENTS / CONVERSIONS / APPLIES ──
-  if (lower.match(/event|conversion|appl|job_apply|click|chatbot|interact/)) {
+  // ── CHATBOT ──
+  if (lower.match(/chatbot|chat\s*bot/)) {
+    return {
+      params: {
+        startDate: dateRange.start,
+        endDate: dateRange.end,
+        dimensions: ["date"],
+        metrics: ["eventCount", "totalUsers"],
+        orderBy: "date",
+        orderDesc: false,
+        dimensionFilter: {
+          filter: { fieldName: "eventName", stringFilter: { matchType: "EXACT", value: "chatbot_interaction" } },
+        },
+      },
+      summary_template: "chatbot",
+      chartType: "line",
+      comparison: wantsComparison,
+    };
+  }
+
+  // ── FORM / K&B SUBMISSIONS ──
+  if (lower.match(/form|submission|k&b|k\s*and\s*b/)) {
+    const isKB = lower.match(/k&b|k\s*and\s*b/);
+    return {
+      params: {
+        startDate: dateRange.start,
+        endDate: dateRange.end,
+        dimensions: ["date"],
+        metrics: ["eventCount", "totalUsers"],
+        orderBy: "date",
+        orderDesc: false,
+        dimensionFilter: {
+          filter: { fieldName: "eventName", stringFilter: { matchType: "EXACT", value: isKB ? "k&b_submissions" : "form_start" } },
+        },
+      },
+      summary_template: "form_events",
+      chartType: "line",
+      comparison: wantsComparison,
+    };
+  }
+
+  // ── SIGN IN ──
+  if (lower.match(/sign.?in|login|log.?in/)) {
+    return {
+      params: {
+        startDate: dateRange.start,
+        endDate: dateRange.end,
+        dimensions: ["date"],
+        metrics: ["eventCount", "totalUsers"],
+        orderBy: "date",
+        orderDesc: false,
+        dimensionFilter: {
+          filter: { fieldName: "eventName", stringFilter: { matchType: "EXACT", value: "sign_in_click" } },
+        },
+      },
+      summary_template: "sign_in",
+      chartType: "line",
+      comparison: wantsComparison,
+    };
+  }
+
+  // ── EVENTS / CONVERSIONS (general) ──
+  if (lower.match(/event|conversion|click|interact/)) {
     return {
       params: {
         startDate: dateRange.start,
@@ -453,6 +640,61 @@ export function buildSummary(
 
       summary += `\n\nDaily trend shown below:`;
       return summary;
+    }
+
+    case "job_apply_trend": {
+      const totalApplies = rows.reduce((s, r) => s + (Number(r.eventCount) || 0), 0);
+      const totalApplyUsers = rows.reduce((s, r) => s + (Number(r.totalUsers) || 0), 0);
+
+      let summary = `Job apply overview for ${period}:\n\n` +
+        `Total Applies: ${totalApplies.toLocaleString()}\n` +
+        `Unique Users Who Applied: ${totalApplyUsers.toLocaleString()}\n` +
+        `Avg Applies per User: ${totalApplyUsers > 0 ? (totalApplies / totalApplyUsers).toFixed(1) : "0"}\n`;
+
+      if (comparisonRows && comparisonRows.length > 0 && comparisonDateRange) {
+        const prevApplies = comparisonRows.reduce((s, r) => s + (Number(r.eventCount) || 0), 0);
+        const change = prevApplies > 0 ? (((totalApplies - prevApplies) / prevApplies) * 100).toFixed(1) : "N/A";
+        summary += `\nComparison vs ${comparisonDateRange.start} to ${comparisonDateRange.end}:\n` +
+          `Previous Period Applies: ${prevApplies.toLocaleString()}\n` +
+          `Change: ${change}%\n`;
+        if (typeof change === "string" && parseFloat(change) < -10) summary += `\n⚠️ Significant drop in job applies.`;
+        else if (typeof change === "string" && parseFloat(change) > 10) summary += `\n✅ Job applies trending up.`;
+      }
+
+      summary += `\n\nTrend shown below:`;
+      return summary;
+    }
+
+    case "job_apply_company": {
+      const totalApplies = rows.reduce((s, r) => s + (Number(r.eventCount) || 0), 0);
+      return `Job applies for this company over ${period}:\n\n` +
+        `Total: ${totalApplies.toLocaleString()} applies\n\n` +
+        `Daily trend shown below:`;
+    }
+
+    case "job_apply_breakdown": {
+      const filtered = rows.filter(r => String(r.eventName).startsWith("job_apply"));
+      return `Job applies by company for ${period}:\n\n` +
+        filtered.slice(0, 5).map((r, i) => {
+          const name = String(r.eventName).replace("job_apply_", "").replace(/_/g, " ");
+          return `${i + 1}. ${name || "Generic"} — ${Number(r.eventCount).toLocaleString()} applies`;
+        }).join("\n") +
+        `\n\nFull breakdown below:`;
+    }
+
+    case "chatbot": {
+      const total = rows.reduce((s, r) => s + (Number(r.eventCount) || 0), 0);
+      return `Chatbot interactions for ${period}: ${total.toLocaleString()} total interactions.\n\nDaily trend shown below:`;
+    }
+
+    case "form_events": {
+      const total = rows.reduce((s, r) => s + (Number(r.eventCount) || 0), 0);
+      return `Form submissions for ${period}: ${total.toLocaleString()} total.\n\nDaily trend shown below:`;
+    }
+
+    case "sign_in": {
+      const total = rows.reduce((s, r) => s + (Number(r.eventCount) || 0), 0);
+      return `Sign-in clicks for ${period}: ${total.toLocaleString()} total.\n\nDaily trend shown below:`;
     }
 
     case "traffic_overview": {
