@@ -5,11 +5,24 @@ import { ChartDisplay } from "@/components/ChartDisplay";
 import { TableDisplay } from "@/components/TableDisplay";
 import { SuggestedQueries } from "@/components/SuggestedQueries";
 
+interface ClarificationQuestion {
+  id: string;
+  text: string;
+  options: { label: string; value: string }[];
+}
+
 interface Message {
   role: "user" | "assistant";
   content: string;
   data?: Record<string, unknown>;
   chartType?: "bar" | "line" | "table" | "metric";
+  geoData?: Record<string, unknown>;
+  geoChartType?: string;
+  clarification?: {
+    questions: ClarificationQuestion[];
+    originalQuery: string;
+    answered: boolean;
+  };
   timestamp: Date;
 }
 
@@ -17,6 +30,12 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [clarificationState, setClarificationState] = useState<{
+    originalQuery: string;
+    answers: Record<string, string>;
+    questions: ClarificationQuestion[];
+    currentIndex: number;
+  } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -24,15 +43,17 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const sendQuery = async (query: string) => {
+  const sendQuery = async (query: string, skipClarification = false) => {
     if (!query.trim() || loading) return;
 
-    const userMsg: Message = {
-      role: "user",
-      content: query,
-      timestamp: new Date(),
-    };
-    setMessages((prev) => [...prev, userMsg]);
+    if (!skipClarification) {
+      const userMsg: Message = {
+        role: "user",
+        content: query,
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, userMsg]);
+    }
     setInput("");
     setLoading(true);
 
@@ -40,7 +61,7 @@ export default function Home() {
       const res = await fetch("/api/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query }),
+        body: JSON.stringify({ query, skipClarification }),
       });
 
       const result = await res.json();
@@ -49,14 +70,40 @@ export default function Home() {
         throw new Error(result.error || "Failed to fetch data");
       }
 
-      const assistantMsg: Message = {
-        role: "assistant",
-        content: result.summary,
-        data: result.data,
-        chartType: result.chartType,
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
+      // Handle clarification response
+      if (result.type === "clarification") {
+        setClarificationState({
+          originalQuery: query,
+          answers: {},
+          questions: result.questions,
+          currentIndex: 0,
+        });
+
+        const clarMsg: Message = {
+          role: "assistant",
+          content: result.message,
+          clarification: {
+            questions: result.questions,
+            originalQuery: query,
+            answered: false,
+          },
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, clarMsg]);
+      } else {
+        // Normal data response
+        const assistantMsg: Message = {
+          role: "assistant",
+          content: result.summary,
+          data: result.data,
+          chartType: result.chartType,
+          geoData: result.geoData,
+          geoChartType: result.geoChartType,
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, assistantMsg]);
+        setClarificationState(null);
+      }
     } catch (err) {
       const errorMsg: Message = {
         role: "assistant",
@@ -64,13 +111,75 @@ export default function Home() {
         timestamp: new Date(),
       };
       setMessages((prev) => [...prev, errorMsg]);
+      setClarificationState(null);
     } finally {
       setLoading(false);
     }
   };
 
+  const handleClarificationAnswer = (questionId: string, value: string, label: string) => {
+    if (!clarificationState) return;
+
+    const newAnswers = { ...clarificationState.answers, [questionId]: value };
+    const nextIndex = clarificationState.currentIndex + 1;
+
+    // Show the user's selection as a message
+    const userMsg: Message = {
+      role: "user",
+      content: label,
+      timestamp: new Date(),
+    };
+    setMessages((prev) => [...prev, userMsg]);
+
+    // Mark the clarification as answered
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.clarification && !msg.clarification.answered
+          ? { ...msg, clarification: { ...msg.clarification, answered: true } }
+          : msg
+      )
+    );
+
+    if (nextIndex < clarificationState.questions.length) {
+      // Show next question
+      setClarificationState({ ...clarificationState, answers: newAnswers, currentIndex: nextIndex });
+      const nextQ = clarificationState.questions[nextIndex];
+      const nextMsg: Message = {
+        role: "assistant",
+        content: nextQ.text,
+        clarification: {
+          questions: [nextQ],
+          originalQuery: clarificationState.originalQuery,
+          answered: false,
+        },
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, nextMsg]);
+    } else {
+      // All questions answered — build the refined query
+      const refinedParts = [clarificationState.originalQuery];
+      Object.values(newAnswers).forEach((v) => refinedParts.push(v));
+      const refinedQuery = refinedParts.join(", ");
+
+      // Send as a refined query, skipping clarification
+      sendQuery(refinedQuery, true);
+    }
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    // If user types during clarification, treat it as overriding the clarification
+    if (clarificationState) {
+      setClarificationState(null);
+      // Mark any open clarifications as answered
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.clarification && !msg.clarification.answered
+            ? { ...msg, clarification: { ...msg.clarification, answered: true } }
+            : msg
+        )
+      );
+    }
     sendQuery(input);
   };
 
@@ -120,6 +229,23 @@ export default function Home() {
               ) : (
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 max-w-full">
                   <p className="text-gray-800 whitespace-pre-wrap">{msg.content}</p>
+
+                  {/* Clarification options */}
+                  {msg.clarification && !msg.clarification.answered && (
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      {msg.clarification.questions[0]?.options.map((opt) => (
+                        <button
+                          key={opt.value}
+                          onClick={() => handleClarificationAnswer(msg.clarification!.questions[0].id, opt.value, opt.label)}
+                          className="px-4 py-2 bg-indigo-50 border border-indigo-200 rounded-full text-sm text-indigo-700 hover:bg-indigo-100 transition-colors"
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Data visualizations */}
                   {msg.data && msg.chartType === "table" && (
                     <div className="mt-4">
                       <TableDisplay data={msg.data} />
@@ -138,6 +264,14 @@ export default function Home() {
                           <p className="text-xs text-gray-500 mt-1">{key}</p>
                         </div>
                       ))}
+                    </div>
+                  )}
+
+                  {/* Geographic breakdown (additional) */}
+                  {msg.geoData && (
+                    <div className="mt-6">
+                      <p className="text-sm font-medium text-gray-600 mb-2">Geographic Breakdown:</p>
+                      <TableDisplay data={msg.geoData} />
                     </div>
                   )}
                 </div>
@@ -169,7 +303,7 @@ export default function Home() {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask about your analytics... (e.g., 'What was our traffic last week?')"
+            placeholder="Ask about your analytics... (e.g., 'Has engagement dropped this week vs last week?')"
             className="flex-1 px-4 py-3 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm"
             disabled={loading}
           />

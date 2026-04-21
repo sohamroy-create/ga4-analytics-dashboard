@@ -22,14 +22,16 @@ const columnLabels: Record<string, string> = {
   sessions: "Sessions",
   screenPageViews: "Page Views",
   bounceRate: "Bounce Rate",
+  engagementRate: "Engagement Rate",
   newUsers: "New Users",
   averageSessionDuration: "Avg Duration",
+  sessionsPerUser: "Sessions/User",
   eventCount: "Count",
 };
 
 function formatCell(key: string, value: unknown): string {
   if (value === null || value === undefined) return "—";
-  if (key === "bounceRate") return `${Number(value).toFixed(1)}%`;
+  if (key === "bounceRate" || key === "engagementRate") return `${Number(value).toFixed(1)}%`;
   if (key === "averageSessionDuration") return `${Number(value)}s`;
   if (typeof value === "number") return value.toLocaleString();
   return String(value);

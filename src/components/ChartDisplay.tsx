@@ -31,8 +31,10 @@ const metricLabels: Record<string, string> = {
   sessions: "Sessions",
   screenPageViews: "Page Views",
   bounceRate: "Bounce Rate (%)",
+  engagementRate: "Engagement Rate (%)",
   newUsers: "New Users",
   averageSessionDuration: "Avg Duration (s)",
+  sessionsPerUser: "Sessions/User",
   eventCount: "Event Count",
 };
 
