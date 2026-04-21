@@ -139,42 +139,71 @@ export function checkClarification(query: string): ClarificationResult | null {
     };
   }
 
-  // 2. Job apply specific: ask WHICH job apply they mean
-  if (intent === "job_apply" && !detectedCompany && !lower.match(/by\s*company|broken?\s*down.*company|per\s*company|each\s*company|all.*combined|all.*job/)) {
-    questions.push({
-      id: "job_apply_type",
-      text: "Which job apply data do you want to see? We track applies across multiple companies.",
-      options: [
-        { label: "All job applies (combined)", value: "all job_apply events combined" },
-        { label: "Breakdown by company", value: "job_apply broken down by company" },
-        { label: "LHH US", value: "job_apply for LHH_US" },
-        { label: "Wells Fargo", value: "job_apply for Wells_Fargo" },
-        { label: "KB Transportation", value: "job_apply for KB_Transportation" },
-        { label: "Maxion Research", value: "job_apply for Maxion_Research" },
-        { label: "Unknown company applies", value: "job_apply_unknown events" },
-      ],
-    });
+  // 2. Job apply specific
+  const hasBreakdownDimension = hasGeo || hasScope || !!lower.match(/by\s*(source|medium|channel|device|browser|page|landing|country|city)/) || !!lower.match(/(source|medium|channel|device|browser|geographic|geo|country)\s*(level|wise|based|breakdown|split)/) || !!lower.match(/\b(source|medium|channel|device|browser)\b.*\b(breakdown|break\s*down|split|level)\b/);
 
-    // Also ask timeline if missing
-    if (!hasTimeline) {
-      questions.push({
-        id: "timeline",
-        text: "What time period should I look at?",
-        options: [
-          { label: "Last 7 days", value: "last 7 days" },
-          { label: "Last 14 days", value: "last 14 days" },
-          { label: "Last 30 days", value: "last 30 days" },
-          { label: "Last 90 days", value: "last 90 days" },
-          { label: "This year (YTD)", value: "this year" },
-        ],
-      });
+  if (intent === "job_apply") {
+    // If user already specified a breakdown dimension (source, geo, device, etc.)
+    // → skip company question (assume all job applies), but still ask timeline if missing
+    if (hasBreakdownDimension && !detectedCompany) {
+      if (!hasTimeline) {
+        questions.push({
+          id: "timeline",
+          text: "What time period should I look at for job applies?",
+          options: [
+            { label: "Last 7 days", value: "last 7 days" },
+            { label: "Last 14 days", value: "last 14 days" },
+            { label: "Last 30 days", value: "last 30 days" },
+            { label: "Last 90 days", value: "last 90 days" },
+            { label: "This year (YTD)", value: "this year" },
+          ],
+        });
+        return {
+          type: "clarification",
+          message: "I'll show job applies broken down as requested. What time period?",
+          questions,
+        };
+      }
+      // Has dimension AND timeline — go straight to data
+      return null;
     }
 
-    return {
-      type: "clarification",
-      message: "We track job applies across multiple companies. Let me narrow this down:",
-      questions,
-    };
+    // No breakdown dimension specified — ask which company AND timeline
+    if (!detectedCompany && !lower.match(/by\s*company|broken?\s*down.*company|per\s*company|each\s*company|all.*combined|all.*job/)) {
+      questions.push({
+        id: "job_apply_type",
+        text: "Which job apply data do you want to see? We track applies across multiple companies.",
+        options: [
+          { label: "All job applies (combined)", value: "all job_apply events combined" },
+          { label: "Breakdown by company", value: "job_apply broken down by company" },
+          { label: "LHH US", value: "job_apply for LHH_US" },
+          { label: "Wells Fargo", value: "job_apply for Wells_Fargo" },
+          { label: "KB Transportation", value: "job_apply for KB_Transportation" },
+          { label: "Maxion Research", value: "job_apply for Maxion_Research" },
+          { label: "Unknown company applies", value: "job_apply_unknown events" },
+        ],
+      });
+
+      if (!hasTimeline) {
+        questions.push({
+          id: "timeline",
+          text: "What time period should I look at?",
+          options: [
+            { label: "Last 7 days", value: "last 7 days" },
+            { label: "Last 14 days", value: "last 14 days" },
+            { label: "Last 30 days", value: "last 30 days" },
+            { label: "Last 90 days", value: "last 90 days" },
+            { label: "This year (YTD)", value: "this year" },
+          ],
+        });
+      }
+
+      return {
+        type: "clarification",
+        message: "We track job applies across multiple companies. Let me narrow this down:",
+        questions,
+      };
+    }
   }
 
   // 3. "Traffic" or "engagement" with geo dimension but no specific metrics requested
@@ -290,6 +319,9 @@ export function mergeWithContext(query: string, ctx: ConversationContext): strin
     "job_apply_trend": "job apply",
     "job_apply_breakdown": "job apply by company",
     "job_apply_company": "job apply",
+    "job_apply_sources": "job apply by source",
+    "job_apply_devices": "job apply by device",
+    "job_apply_pages": "job apply by page",
     "traffic_overview": "traffic",
     "engagement_rate": "engagement",
     "top_pages": "top pages",
@@ -613,7 +645,72 @@ export function parseQuery(query: string, metadata?: GA4Meta): ParsedQuery {
       };
     }
 
-    // Aggregate job_apply (all combined) over time
+    // Check if user wants a specific breakdown dimension (source, device, page, etc.)
+    const wantsSourceBreakdown = !!lower.match(/\b(source|medium|channel|acquisition|referr)\b/);
+    const wantsDeviceBreakdown = !!lower.match(/\b(device|mobile|desktop|tablet|browser)\b/);
+    const wantsPageBreakdown = !!lower.match(/\b(page|landing|url)\b/) && !lower.match(/page\s*view/);
+
+    if (wantsSourceBreakdown) {
+      return {
+        params: {
+          startDate: dateRange.start,
+          endDate: dateRange.end,
+          dimensions: ["sessionSourceMedium"],
+          metrics: ["eventCount", "totalUsers"],
+          orderBy: "eventCount",
+          orderDesc: true,
+          limit: 20,
+          dimensionFilter: {
+            filter: { fieldName: "eventName", stringFilter: { matchType: "EXACT", value: "job_apply" } },
+          },
+        },
+        summary_template: "job_apply_sources",
+        chartType: "bar",
+        comparison: wantsComparison,
+      };
+    }
+
+    if (wantsDeviceBreakdown) {
+      return {
+        params: {
+          startDate: dateRange.start,
+          endDate: dateRange.end,
+          dimensions: ["deviceCategory"],
+          metrics: ["eventCount", "totalUsers"],
+          orderBy: "eventCount",
+          orderDesc: true,
+          limit: 10,
+          dimensionFilter: {
+            filter: { fieldName: "eventName", stringFilter: { matchType: "EXACT", value: "job_apply" } },
+          },
+        },
+        summary_template: "job_apply_devices",
+        chartType: "bar",
+        comparison: wantsComparison,
+      };
+    }
+
+    if (wantsPageBreakdown) {
+      return {
+        params: {
+          startDate: dateRange.start,
+          endDate: dateRange.end,
+          dimensions: ["pagePath"],
+          metrics: ["eventCount", "totalUsers"],
+          orderBy: "eventCount",
+          orderDesc: true,
+          limit: 20,
+          dimensionFilter: {
+            filter: { fieldName: "eventName", stringFilter: { matchType: "EXACT", value: "job_apply" } },
+          },
+        },
+        summary_template: "job_apply_pages",
+        chartType: "bar",
+        comparison: wantsComparison,
+      };
+    }
+
+    // Aggregate job_apply (all combined) over time (or by geo)
     return {
       params: {
         startDate: dateRange.start,
@@ -630,7 +727,7 @@ export function parseQuery(query: string, metadata?: GA4Meta): ParsedQuery {
       summary_template: "job_apply_trend",
       chartType: wantsGeoBreakdown ? "bar" : "line",
       comparison: wantsComparison,
-      geoBreakdown: false, // main dimension is already geo when wantsGeoBreakdown is true
+      geoBreakdown: false,
     };
   }
 
@@ -1048,6 +1145,36 @@ export function buildSummary(
           const name = String(r.eventName).replace("job_apply_", "").replace(/_/g, " ");
           return `${i + 1}. ${name || "Generic"} — ${Number(r.eventCount).toLocaleString()} applies`;
         }).join("\n") +
+        `\n\nFull breakdown below:`;
+    }
+
+    case "job_apply_sources": {
+      const totalApplies = rows.reduce((s, r) => s + (Number(r.eventCount) || 0), 0);
+      return `Job applies by source/medium for ${period}:\n\n` +
+        `Total: ${totalApplies.toLocaleString()} applies\n\n` +
+        rows.slice(0, 5).map((r, i) =>
+          `${i + 1}. ${r.sessionSourceMedium} — ${Number(r.eventCount).toLocaleString()} applies, ${Number(r.totalUsers).toLocaleString()} users`
+        ).join("\n") +
+        `\n\nFull breakdown below:`;
+    }
+
+    case "job_apply_devices": {
+      const totalApplies = rows.reduce((s, r) => s + (Number(r.eventCount) || 0), 0);
+      return `Job applies by device for ${period}:\n\n` +
+        `Total: ${totalApplies.toLocaleString()} applies\n\n` +
+        rows.map((r) =>
+          `${r.deviceCategory}: ${Number(r.eventCount).toLocaleString()} applies (${Number(r.totalUsers).toLocaleString()} users)`
+        ).join("\n") +
+        `\n\nFull breakdown below:`;
+    }
+
+    case "job_apply_pages": {
+      const totalApplies = rows.reduce((s, r) => s + (Number(r.eventCount) || 0), 0);
+      return `Job applies by page for ${period}:\n\n` +
+        `Total: ${totalApplies.toLocaleString()} applies\n\n` +
+        rows.slice(0, 5).map((r, i) =>
+          `${i + 1}. ${r.pagePath} — ${Number(r.eventCount).toLocaleString()} applies`
+        ).join("\n") +
         `\n\nFull breakdown below:`;
     }
 
