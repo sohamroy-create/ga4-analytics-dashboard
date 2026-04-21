@@ -41,7 +41,8 @@ function hasExplicitTimeline(query: string): boolean {
 
 function hasExplicitGeo(query: string): boolean {
   const lower = query.toLowerCase();
-  return /countr|geo|region|city|cities|india|us|usa|uk|global|worldwide|by\s*(location|geography|region)|broken?\s*down.*geo/i.test(lower);
+  // Include common typos: grography, grographoes, geograhpy, etc.
+  return /countr|geog|grog|region|city|cities|india|usa|uk\b|global|worldwide|by\s*(location|geography|geographies|region)|broken?\s*down.*(geo|gro|countr|region|location)/i.test(lower);
 }
 
 function hasExplicitScope(query: string): boolean {
@@ -68,11 +69,13 @@ function detectIntent(query: string): string {
   const lower = query.toLowerCase();
   // Job apply specific (before generic events)
   if (lower.match(/job.?appl|apply|applies|application/)) return "job_apply";
+  // "traffic sources" = sources, not traffic. Check compound phrases FIRST.
+  if (lower.match(/traffic\s*sources?|source.*traffic/)) return "sources";
   if (lower.match(/engag|bounce|session duration|retention|drop|increas|decreas|improv|worsen|chang/)) return "engagement";
-  if (lower.match(/traffic|visit|overview|how.*doing|dashboard|summary|performance/)) return "traffic";
   if (lower.match(/top pages?|popular pages?|most visited|best pages?|page views/)) return "top_pages";
   if (lower.match(/source|referr|channel|where.*come|acquisition|medium/)) return "sources";
-  if (lower.match(/countr|geo|location|region|city|where.*from/)) return "geo";
+  if (lower.match(/traffic|visit|overview|how.*doing|dashboard|summary|performance/)) return "traffic";
+  if (lower.match(/countr|geog|grog|location|region|city|where.*from/)) return "geo";
   if (lower.match(/device|mobile|desktop|tablet|browser/)) return "devices";
   if (lower.match(/event|conversion|click|chatbot|interact/)) return "events";
   if (lower.match(/users?|active/)) return "users";
@@ -494,7 +497,7 @@ export function parseQuery(query: string, metadata?: GA4Meta): ParsedQuery {
   const dateRange = getDateRange(query);
 
   const wantsComparison = !!lower.match(/compar|vs|versus|drop|increas|decreas|chang|improv|worsen/);
-  const wantsGeoBreakdown = !!lower.match(/by\s*(country|countries|city|cities|geo|region|geography)|broken?\s*down.*geo|globally/);
+  const wantsGeoBreakdown = !!lower.match(/by\s*(country|countries|city|cities|geo\w*|gro\w*|region|geography|geographies|location)|broken?\s*down.*(geo|gro|countr|region|location)|based\s*on\s*(geo\w*|gro\w*|countr|region|location)|globally/);
 
   // ── FUNNEL EXPLORATION ──
   if (lower.match(/funnel|conversion\s*funnel|conversion\s*path|user\s*journey|user\s*flow/)) {
@@ -623,7 +626,7 @@ export function parseQuery(query: string, metadata?: GA4Meta): ParsedQuery {
       summary_template: "job_apply_trend",
       chartType: wantsGeoBreakdown ? "bar" : "line",
       comparison: wantsComparison,
-      geoBreakdown: wantsGeoBreakdown && !lower.match(/by\s*(country|countries|city|cities|geo|region)/),
+      geoBreakdown: false, // main dimension is already geo when wantsGeoBreakdown is true
     };
   }
 
@@ -642,7 +645,7 @@ export function parseQuery(query: string, metadata?: GA4Meta): ParsedQuery {
       summary_template: "engagement_rate",
       chartType: wantsGeoBreakdown ? "table" : "line",
       comparison: wantsComparison,
-      geoBreakdown: wantsGeoBreakdown && !lower.match(/by\s*(country|countries|city|cities|geo|region)/),
+      geoBreakdown: false, // main dimension is already geo when wantsGeoBreakdown is true
     };
   }
 
@@ -661,7 +664,7 @@ export function parseQuery(query: string, metadata?: GA4Meta): ParsedQuery {
       summary_template: "traffic_overview",
       chartType: wantsGeoBreakdown ? "bar" : "line",
       comparison: wantsComparison,
-      geoBreakdown: wantsGeoBreakdown && !lower.match(/by\s*(country|countries|city|cities|geo|region)/),
+      geoBreakdown: false, // main dimension is already geo when wantsGeoBreakdown is true
     };
   }
 
@@ -684,6 +687,23 @@ export function parseQuery(query: string, metadata?: GA4Meta): ParsedQuery {
 
   // ── SOURCES / REFERRALS / CHANNELS ──
   if (lower.match(/source|referr|channel|where.*come|acquisition|medium/)) {
+    if (wantsGeoBreakdown) {
+      // Sources broken down by geography
+      return {
+        params: {
+          startDate: dateRange.start,
+          endDate: dateRange.end,
+          dimensions: ["country"],
+          metrics: ["sessions", "totalUsers", "screenPageViews", "bounceRate"],
+          orderBy: "sessions",
+          orderDesc: true,
+          limit: 20,
+        },
+        summary_template: "geo",
+        chartType: "bar",
+        geoBreakdown: false, // already geo
+      };
+    }
     return {
       params: {
         startDate: dateRange.start,
@@ -700,7 +720,7 @@ export function parseQuery(query: string, metadata?: GA4Meta): ParsedQuery {
   }
 
   // ── COUNTRIES / GEO ──
-  if (lower.match(/countr|geo|location|region|city|where.*from/)) {
+  if (lower.match(/countr|geog|grog|location|region|city|where.*from/)) {
     const isDimCity = lower.includes("city") || lower.includes("cities");
     return {
       params: {
