@@ -71,7 +71,7 @@ export default function Home() {
       }
 
       // Handle clarification response
-      if (result.type === "clarification") {
+      if (result.type === "clarification" && result.questions && Array.isArray(result.questions) && result.questions.length > 0) {
         setClarificationState({
           originalQuery: query,
           answers: {},
@@ -81,7 +81,7 @@ export default function Home() {
 
         const clarMsg: Message = {
           role: "assistant",
-          content: result.message,
+          content: result.message || "Let me clarify a few things:",
           clarification: {
             questions: result.questions,
             originalQuery: query,
@@ -94,17 +94,18 @@ export default function Home() {
         // Normal data response
         const assistantMsg: Message = {
           role: "assistant",
-          content: result.summary || "Here are your results:",
-          data: result.data,
-          chartType: result.chartType,
-          geoData: result.geoData,
-          geoChartType: result.geoChartType,
+          content: result.summary || result.message || "Here are your results:",
+          data: result.data || undefined,
+          chartType: result.chartType || undefined,
+          geoData: result.geoData || undefined,
+          geoChartType: result.geoChartType || undefined,
           timestamp: new Date(),
         };
         setMessages((prev) => [...prev, assistantMsg]);
         setClarificationState(null);
       }
     } catch (err) {
+      console.error("Query error:", err);
       const errorMsg: Message = {
         role: "assistant",
         content: `Sorry, I couldn't process that query. ${err instanceof Error ? err.message : "Please try again."}`,
@@ -228,12 +229,15 @@ export default function Home() {
                 </div>
               ) : (
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 max-w-full">
-                  <p className="text-gray-800 whitespace-pre-wrap">{msg.content}</p>
+                  {/* Always show message content first */}
+                  {msg.content && (
+                    <p className="text-gray-800 whitespace-pre-wrap">{msg.content}</p>
+                  )}
 
                   {/* Clarification options */}
-                  {msg.clarification && !msg.clarification.answered && (
+                  {msg.clarification && !msg.clarification.answered && msg.clarification.questions && msg.clarification.questions.length > 0 && (
                     <div className="mt-4 flex flex-wrap gap-2">
-                      {msg.clarification.questions[0]?.options.map((opt) => (
+                      {(msg.clarification.questions[0]?.options || []).map((opt) => (
                         <button
                           key={opt.value}
                           onClick={() => handleClarificationAnswer(msg.clarification!.questions[0].id, opt.value, opt.label)}
@@ -245,39 +249,43 @@ export default function Home() {
                     </div>
                   )}
 
-                  {/* Data visualizations */}
+                  {/* Data visualizations — wrapped with null checks */}
                   {msg.data && msg.chartType === "table" && (
                     <div className="mt-4">
                       <TableDisplay data={msg.data} />
                     </div>
                   )}
-                  {msg.data && msg.chartType === "funnel" && (
-                    <div className="mt-4 space-y-2">
-                      {((msg.data as Record<string, unknown>).rows as Record<string, unknown>[])?.map((row, idx, arr) => {
-                        const users = Number(row.users) || 0;
-                        const maxUsers = Number(arr[0]?.users) || 1;
-                        const width = Math.max((users / maxUsers) * 100, 15);
-                        const rate = Number(row.conversionRate) || 0;
-                        return (
-                          <div key={idx}>
-                            <div className="flex items-center gap-3">
-                              <div className="text-xs text-gray-500 w-24 text-right shrink-0">{String(row.step)}</div>
-                              <div className="flex-1">
-                                <div className="h-10 rounded-lg flex items-center px-3 text-white text-sm font-medium transition-all"
-                                  style={{ width: `${width}%`, backgroundColor: idx === 0 ? "#6366f1" : idx === arr.length - 1 ? "#10b981" : "#818cf8" }}>
-                                  {users.toLocaleString()} users
+                  {msg.data && msg.chartType === "funnel" && (() => {
+                    const funnelRows = (msg.data as Record<string, unknown>)?.rows as Record<string, unknown>[] | undefined;
+                    if (!funnelRows || funnelRows.length === 0) return null;
+                    return (
+                      <div className="mt-4 space-y-2">
+                        {funnelRows.map((row, idx, arr) => {
+                          const users = Number(row.users) || 0;
+                          const maxUsers = Number(arr[0]?.users) || 1;
+                          const width = Math.max((users / maxUsers) * 100, 15);
+                          const rate = Number(row.conversionRate) || 0;
+                          return (
+                            <div key={idx}>
+                              <div className="flex items-center gap-3">
+                                <div className="text-xs text-gray-500 w-24 text-right shrink-0">{String(row.step)}</div>
+                                <div className="flex-1">
+                                  <div className="h-10 rounded-lg flex items-center px-3 text-white text-sm font-medium transition-all"
+                                    style={{ width: `${width}%`, backgroundColor: idx === 0 ? "#6366f1" : idx === arr.length - 1 ? "#10b981" : "#818cf8" }}>
+                                    {users.toLocaleString()} users
+                                  </div>
                                 </div>
+                                {idx > 0 && <span className="text-xs text-gray-500 w-16 shrink-0">{rate}%</span>}
                               </div>
-                              {idx > 0 && <span className="text-xs text-gray-500 w-16 shrink-0">{rate}%</span>}
+                              {idx < arr.length - 1 && Number(row.dropoff) > 0 && (
+                                <div className="ml-28 text-xs text-red-400 py-0.5">↓ {Number(row.dropoff).toLocaleString()} dropped off</div>
+                              )}
                             </div>
-                            {idx < arr.length - 1 && Number(row.dropoff) > 0 && (
-                              <div className="ml-28 text-xs text-red-400 py-0.5">↓ {Number(row.dropoff).toLocaleString()} dropped off</div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
                   {msg.data && msg.chartType && msg.chartType !== "table" && msg.chartType !== "metric" && msg.chartType !== "funnel" && (
                     <div className="mt-4">
                       <ChartDisplay data={msg.data} chartType={msg.chartType as "bar" | "line"} />

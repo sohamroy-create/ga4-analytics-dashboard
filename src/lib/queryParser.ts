@@ -101,34 +101,41 @@ function detectCompanyInQuery(query: string): string | null {
 }
 
 export function checkClarification(query: string): ClarificationResult | null {
-  const lower = query.toLowerCase();
   const intent = detectIntent(query);
   const hasTimeline = hasExplicitTimeline(query);
-  const hasGeo = hasExplicitGeo(query);
   const hasScope = hasExplicitScope(query);
   const detectedCompany = detectCompanyInQuery(query);
 
   const questions: ClarificationQuestion[] = [];
 
-  // If the intent is unclear or very generic
-  if (intent === "unknown" && !hasScope) {
+  // ONLY ask clarification for truly ambiguous queries:
+  // 1. Unknown intent with no scope and no timeline → ask what they want
+  // 2. job_apply without a specific company → ask which company
+
+  // If the query is completely vague (no intent, no scope, no timeline)
+  if (intent === "unknown" && !hasScope && !hasTimeline) {
     questions.push({
       id: "scope",
       text: "What aspect of your analytics are you interested in?",
       options: [
-        { label: "Traffic Overview", value: "traffic overview" },
-        { label: "Engagement & Bounce Rate", value: "engagement metrics" },
-        { label: "Job Apply Metrics", value: "job apply rate" },
-        { label: "Top Pages", value: "top pages" },
-        { label: "Traffic Sources", value: "traffic sources" },
-        { label: "Geographic Breakdown", value: "geographic breakdown" },
-        { label: "Events & Conversions", value: "events and conversions" },
+        { label: "Traffic Overview", value: "traffic overview for last 30 days" },
+        { label: "Engagement & Bounce Rate", value: "engagement metrics for last 30 days" },
+        { label: "Job Apply Metrics", value: "job apply rate for last 30 days" },
+        { label: "Top Pages", value: "top pages for last 30 days" },
+        { label: "Traffic Sources", value: "traffic sources for last 30 days" },
+        { label: "Geographic Breakdown", value: "geographic breakdown for last 30 days" },
+        { label: "Events & Conversions", value: "events and conversions for last 30 days" },
       ],
     });
+    return {
+      type: "clarification",
+      message: "I'd like to help! What aspect of your analytics are you interested in?",
+      questions,
+    };
   }
 
-  // Job apply specific: ask WHICH job apply they mean
-  if (intent === "job_apply" && !detectedCompany) {
+  // Job apply specific: ask WHICH job apply they mean (only when no company specified and no "by company" breakdown requested)
+  if (intent === "job_apply" && !detectedCompany && !query.toLowerCase().match(/by\s*company|broken?\s*down.*company|per\s*company|each\s*company|all.*combined|all.*job/)) {
     questions.push({
       id: "job_apply_type",
       text: "Which job apply data do you want to see? We track applies across multiple companies.",
@@ -142,64 +149,16 @@ export function checkClarification(query: string): ClarificationResult | null {
         { label: "Unknown company applies", value: "job_apply_unknown events" },
       ],
     });
+    return {
+      type: "clarification",
+      message: "We track job applies across multiple companies. Which would you like to see?",
+      questions,
+    };
   }
 
-  // If no timeline specified on an open-ended question
-  if (!hasTimeline) {
-    questions.push({
-      id: "timeline",
-      text: "What time period should I look at?",
-      options: [
-        { label: "Last 7 days", value: "last 7 days" },
-        { label: "Last 14 days", value: "last 14 days" },
-        { label: "Last 30 days", value: "last 30 days" },
-        { label: "Last 90 days", value: "last 90 days" },
-        { label: "This year (YTD)", value: "this year" },
-      ],
-    });
-  }
-
-  // For engagement/comparison queries, ask about geo if not specified
-  if ((intent === "engagement" || intent === "traffic" || intent === "job_apply" || intent === "unknown") && !hasGeo && !hasScope) {
-    questions.push({
-      id: "geo",
-      text: "Should I break this down by geography?",
-      options: [
-        { label: "Global (all regions)", value: "globally" },
-        { label: "By country", value: "broken down by country" },
-        { label: "By city", value: "broken down by city" },
-      ],
-    });
-  }
-
-  // For engagement/job_apply with comparison keywords
-  if ((intent === "engagement" || intent === "job_apply") && lower.match(/drop|increas|decreas|improv|worsen|chang|compar|trend/)) {
-    if (!questions.find((q) => q.id === "timeline")) {
-      questions.push({
-        id: "compare",
-        text: "Want me to compare against a previous period?",
-        options: [
-          { label: "Yes, compare week-over-week", value: "compare this week vs last week" },
-          { label: "Yes, compare month-over-month", value: "compare this month vs last month" },
-          { label: "No, just show the trend", value: "show the trend" },
-        ],
-      });
-    }
-  }
-
-  if (questions.length === 0) return null;
-
-  const intentLabels: Record<string, string> = {
-    job_apply: "job apply", engagement: "engagement", traffic: "traffic",
-    top_pages: "top pages", sources: "sources", geo: "geographic",
-    devices: "device", events: "events",
-  };
-  const intentLabel = intentLabels[intent] || "analytics";
-  return {
-    type: "clarification",
-    message: `I'd like to give you the most useful ${intentLabel} data. Let me ask a few quick questions:`,
-    questions,
-  };
+  // For all other queries with a clear intent, just run the query directly.
+  // The parser will use sensible defaults (last 30 days if no timeline, etc.)
+  return null;
 }
 
 // ─── Date parsing ───
