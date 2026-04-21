@@ -15,7 +15,7 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   data?: Record<string, unknown>;
-  chartType?: "bar" | "line" | "table" | "metric";
+  chartType?: "bar" | "line" | "table" | "metric" | "funnel";
   geoData?: Record<string, unknown>;
   geoChartType?: string;
   clarification?: {
@@ -251,9 +251,36 @@ export default function Home() {
                       <TableDisplay data={msg.data} />
                     </div>
                   )}
-                  {msg.data && msg.chartType && msg.chartType !== "table" && msg.chartType !== "metric" && (
+                  {msg.data && msg.chartType === "funnel" && (
+                    <div className="mt-4 space-y-2">
+                      {((msg.data as Record<string, unknown>).rows as Record<string, unknown>[])?.map((row, idx, arr) => {
+                        const users = Number(row.users) || 0;
+                        const maxUsers = Number(arr[0]?.users) || 1;
+                        const width = Math.max((users / maxUsers) * 100, 15);
+                        const rate = Number(row.conversionRate) || 0;
+                        return (
+                          <div key={idx}>
+                            <div className="flex items-center gap-3">
+                              <div className="text-xs text-gray-500 w-24 text-right shrink-0">{String(row.step)}</div>
+                              <div className="flex-1">
+                                <div className="h-10 rounded-lg flex items-center px-3 text-white text-sm font-medium transition-all"
+                                  style={{ width: `${width}%`, backgroundColor: idx === 0 ? "#6366f1" : idx === arr.length - 1 ? "#10b981" : "#818cf8" }}>
+                                  {users.toLocaleString()} users
+                                </div>
+                              </div>
+                              {idx > 0 && <span className="text-xs text-gray-500 w-16 shrink-0">{rate}%</span>}
+                            </div>
+                            {idx < arr.length - 1 && Number(row.dropoff) > 0 && (
+                              <div className="ml-28 text-xs text-red-400 py-0.5">↓ {Number(row.dropoff).toLocaleString()} dropped off</div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {msg.data && msg.chartType && msg.chartType !== "table" && msg.chartType !== "metric" && msg.chartType !== "funnel" && (
                     <div className="mt-4">
-                      <ChartDisplay data={msg.data} chartType={msg.chartType} />
+                      <ChartDisplay data={msg.data} chartType={msg.chartType as "bar" | "line"} />
                     </div>
                   )}
                   {msg.data && msg.chartType === "metric" && (

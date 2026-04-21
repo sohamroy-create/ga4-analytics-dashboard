@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { runGA4Report } from "@/lib/ga4";
-import { parseQuery, buildSummary, checkClarification, getDateRange } from "@/lib/queryParser";
+import { runGA4Report, runFunnelReport, runPathAnalysis, getPropertyMetadata } from "@/lib/ga4";
+import { parseQuery, buildSummary, checkClarification } from "@/lib/queryParser";
 
 function formatRows(rows: Record<string, string | number>[]) {
   return rows.map((row) => {
@@ -69,8 +69,51 @@ export async function POST(request: Request) {
       }
     }
 
-    // Step 2: Parse and execute the query
-    const parsed = parseQuery(query);
+    // Step 2: Parse and execute the query (with metadata awareness)
+    let metadata;
+    try { metadata = await getPropertyMetadata(); } catch { metadata = null; }
+    const parsed = parseQuery(query, metadata);
+
+    // ── Handle funnel reports ──
+    if (parsed.reportType === "funnel" && parsed.funnelSteps) {
+      const funnelResults = await runFunnelReport({
+        startDate: parsed.params.startDate, endDate: parsed.params.endDate,
+        steps: parsed.funnelSteps,
+      });
+      const funnelRows = funnelResults.map((r) => ({
+        step: r.stepName, users: r.users, conversionRate: r.rate, dropoff: r.dropoff,
+      }));
+      const totalStart = funnelResults[0]?.users || 0;
+      const totalEnd = funnelResults[funnelResults.length - 1]?.users || 0;
+      const overallRate = totalStart > 0 ? ((totalEnd / totalStart) * 100).toFixed(1) : "0";
+      const summaryText = `Funnel analysis for ${parsed.params.startDate} to ${parsed.params.endDate}:\n\n` +
+        funnelResults.map((r, i) => `${i + 1}. ${r.stepName}: ${r.users.toLocaleString()} users${i > 0 ? ` (${r.rate}% conversion, ${r.dropoff.toLocaleString()} dropped)` : ""}`).join("\n") +
+        `\n\nOverall conversion: ${overallRate}% (${totalStart.toLocaleString()} → ${totalEnd.toLocaleString()})`;
+      return NextResponse.json({
+        type: "data", summary: summaryText,
+        data: { rows: funnelRows, dimensions: ["step"], metrics: ["users", "conversionRate", "dropoff"] },
+        chartType: "funnel",
+      });
+    }
+
+    // ── Handle path analysis ──
+    if (parsed.reportType === "path") {
+      const pathRows = await runPathAnalysis({
+        startDate: parsed.params.startDate, endDate: parsed.params.endDate,
+        eventName: parsed.pathEvent, pagePath: parsed.pathPage,
+      });
+      const formattedPaths = formatRows(pathRows);
+      const summaryText = `Path analysis for ${parsed.params.startDate} to ${parsed.params.endDate}:\n\n` +
+        `Showing pages and events${parsed.pathEvent ? ` related to "${parsed.pathEvent}"` : ""}${parsed.pathPage ? ` on "${parsed.pathPage}"` : ""}.\n` +
+        `Top ${Math.min(pathRows.length, 10)} paths shown below:`;
+      return NextResponse.json({
+        type: "data", summary: summaryText,
+        data: { rows: formattedPaths, dimensions: ["pagePath", "eventName"], metrics: ["eventCount", "totalUsers"] },
+        chartType: "table",
+      });
+    }
+
+    // ── Standard report ──
     const rows = await runGA4Report(parsed.params);
 
     // Step 3: If comparison requested, run the comparison report

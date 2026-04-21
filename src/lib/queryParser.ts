@@ -1,14 +1,18 @@
-import { GA4QueryParams } from "./ga4";
+import { GA4QueryParams, GA4MetadataItem, FunnelStep } from "./ga4";
 
 export interface ParsedQuery {
   params: GA4QueryParams;
   summary_template: string;
-  chartType: "bar" | "line" | "table" | "metric";
-  /** If set, run a comparison report for the previous period too */
+  chartType: "bar" | "line" | "table" | "metric" | "funnel";
   comparison?: boolean;
-  /** If set, also run a geographic breakdown */
   geoBreakdown?: boolean;
+  reportType?: "standard" | "funnel" | "path";
+  funnelSteps?: FunnelStep[];
+  pathEvent?: string;
+  pathPage?: string;
 }
+
+type GA4Meta = { dimensions: GA4MetadataItem[]; metrics: GA4MetadataItem[] } | null;
 
 export interface ClarificationQuestion {
   id: string;
@@ -239,12 +243,189 @@ export function getDateRange(query: string): { start: string; end: string } {
 
 // ─── Query parser ───
 
-export function parseQuery(query: string): ParsedQuery {
+// ─── Dimension/Metric fuzzy matching against GA4 metadata ───
+
+const DIMENSION_ALIASES: Record<string, string> = {
+  "page": "pagePath", "pages": "pagePath", "url": "pagePath", "urls": "pagePath",
+  "landing page": "landingPagePlusQueryString", "entry page": "landingPagePlusQueryString",
+  "source": "sessionSource", "medium": "sessionMedium", "source/medium": "sessionSourceMedium",
+  "campaign": "sessionCampaignName", "channel": "sessionDefaultChannelGroup",
+  "country": "country", "countries": "country", "region": "region", "city": "city",
+  "device": "deviceCategory", "browser": "browser", "os": "operatingSystem",
+  "screen resolution": "screenResolution", "language": "language",
+  "age": "userAgeBracket", "gender": "userGender",
+  "new vs returning": "newVsReturning", "user type": "newVsReturning",
+  "event": "eventName", "event name": "eventName",
+  "page title": "pageTitle", "hostname": "hostName",
+  "continent": "continent", "sub continent": "subContinent",
+  "date": "date", "week": "isoYearIsoWeek", "month": "month", "year": "year",
+  "hour": "hour", "day of week": "dayOfWeek",
+  "first user source": "firstUserSource", "first user medium": "firstUserMedium",
+  "first user campaign": "firstUserCampaignName",
+  "session source platform": "sessionSourcePlatform",
+  "content group": "contentGroup", "content type": "contentType",
+  "page referrer": "pageReferrer",
+};
+
+const METRIC_ALIASES: Record<string, string> = {
+  "users": "totalUsers", "total users": "totalUsers", "visitors": "totalUsers",
+  "new users": "newUsers", "new visitors": "newUsers",
+  "active users": "activeUsers", "active": "active1DayUsers",
+  "sessions": "sessions", "visits": "sessions",
+  "page views": "screenPageViews", "pageviews": "screenPageViews", "views": "screenPageViews",
+  "bounce rate": "bounceRate", "bounces": "bounceRate",
+  "engagement rate": "engagementRate", "engagement": "engagementRate",
+  "session duration": "averageSessionDuration", "avg duration": "averageSessionDuration",
+  "sessions per user": "sessionsPerUser",
+  "engaged sessions": "engagedSessions", "engaged sessions per user": "engagedSessionsPerUser",
+  "event count": "eventCount", "events": "eventCount",
+  "conversions": "conversions", "conversion rate": "sessionConversionRate",
+  "revenue": "totalRevenue", "purchase revenue": "purchaseRevenue",
+  "transactions": "transactions", "ecommerce purchases": "ecommercePurchases",
+  "add to cart": "addToCarts", "checkouts": "checkouts",
+  "items viewed": "itemsViewed", "item revenue": "itemRevenue",
+  "user engagement duration": "userEngagementDuration",
+  "screen page views per session": "screenPageViewsPerSession",
+  "crash free users rate": "crashFreeUsersRate",
+  "wau": "wauPerMau", "dau": "dauPerMau",
+  "scroll": "eventCount", "scrolls": "eventCount",
+};
+
+function resolveMetric(term: string, metadata: GA4Meta): string | null {
+  const lower = term.toLowerCase().trim();
+  if (METRIC_ALIASES[lower]) return METRIC_ALIASES[lower];
+  if (metadata) {
+    const exact = metadata.metrics.find((m) => m.apiName.toLowerCase() === lower || m.uiName.toLowerCase() === lower);
+    if (exact) return exact.apiName;
+    const partial = metadata.metrics.find((m) => m.uiName.toLowerCase().includes(lower) || m.apiName.toLowerCase().includes(lower));
+    if (partial) return partial.apiName;
+  }
+  return null;
+}
+
+function resolveDimension(term: string, metadata: GA4Meta): string | null {
+  const lower = term.toLowerCase().trim();
+  if (DIMENSION_ALIASES[lower]) return DIMENSION_ALIASES[lower];
+  if (metadata) {
+    const exact = metadata.dimensions.find((d) => d.apiName.toLowerCase() === lower || d.uiName.toLowerCase() === lower);
+    if (exact) return exact.apiName;
+    const partial = metadata.dimensions.find((d) => d.uiName.toLowerCase().includes(lower) || d.apiName.toLowerCase().includes(lower));
+    if (partial) return partial.apiName;
+  }
+  return null;
+}
+
+// ─── Funnel detection ───
+
+const KNOWN_FUNNEL_EVENTS: Record<string, string> = {
+  "visit": "session_start", "session": "session_start", "land": "session_start",
+  "page view": "page_view", "view": "page_view", "pageview": "page_view",
+  "search": "view_search_results", "view search": "view_search_results",
+  "scroll": "scroll", "form": "form_start", "form start": "form_start",
+  "apply": "job_apply", "job apply": "job_apply", "application": "job_apply",
+  "click": "click", "chatbot": "chatbot_interaction", "sign in": "sign_in_click",
+  "sign up": "sign_in_click", "login": "sign_in_click",
+};
+
+function parseFunnelSteps(query: string): FunnelStep[] | null {
+  const lower = query.toLowerCase();
+  // Pattern: "from X to Y to Z" or "X → Y → Z" or "X then Y then Z" or "X > Y > Z"
+  const separators = /\s*(?:→|->|>|then|to)\s*/;
+  const funnelMatch = lower.match(/(?:funnel|path|flow|journey|conversion)\s*(?:from\s+|:\s*)?(.+)/);
+  if (!funnelMatch) return null;
+
+  const stepsStr = funnelMatch[1];
+  const stepNames = stepsStr.split(separators).map((s) => s.trim()).filter(Boolean);
+  if (stepNames.length < 2) return null;
+
+  const steps: FunnelStep[] = [];
+  for (const name of stepNames) {
+    const eventName = KNOWN_FUNNEL_EVENTS[name] || Object.entries(KNOWN_FUNNEL_EVENTS).find(([k]) => name.includes(k))?.[1];
+    if (eventName) {
+      steps.push({ name: name.charAt(0).toUpperCase() + name.slice(1), eventName });
+    } else if (name.startsWith("/")) {
+      // It's a page path
+      steps.push({ name, eventName: "page_view" });
+    } else {
+      // Assume it's an event name directly
+      steps.push({ name, eventName: name.replace(/\s+/g, "_") });
+    }
+  }
+  return steps.length >= 2 ? steps : null;
+}
+
+// ─── Main parser ───
+
+export function parseQuery(query: string, metadata?: GA4Meta): ParsedQuery {
   const lower = query.toLowerCase();
   const dateRange = getDateRange(query);
 
   const wantsComparison = !!lower.match(/compar|vs|versus|drop|increas|decreas|chang|improv|worsen/);
   const wantsGeoBreakdown = !!lower.match(/by\s*(country|countries|city|cities|geo|region|geography)|broken?\s*down.*geo|globally/);
+
+  // ── FUNNEL EXPLORATION ──
+  if (lower.match(/funnel|conversion\s*funnel|conversion\s*path|user\s*journey|user\s*flow/)) {
+    const steps = parseFunnelSteps(query);
+    if (steps) {
+      return {
+        params: { startDate: dateRange.start, endDate: dateRange.end, dimensions: [], metrics: [] },
+        summary_template: "funnel", chartType: "funnel",
+        reportType: "funnel", funnelSteps: steps,
+      };
+    }
+    // Default funnel: visit → page_view → search → apply
+    return {
+      params: { startDate: dateRange.start, endDate: dateRange.end, dimensions: [], metrics: [] },
+      summary_template: "funnel", chartType: "funnel", reportType: "funnel",
+      funnelSteps: [
+        { name: "Session Start", eventName: "session_start" },
+        { name: "Page View", eventName: "page_view" },
+        { name: "Search", eventName: "view_search_results" },
+        { name: "Job Apply", eventName: "job_apply" },
+      ],
+    };
+  }
+
+  // ── PATH / FLOW EXPLORATION ──
+  if (lower.match(/path\s*(explor|analys)|user\s*path|page\s*flow|what\s*pages?\s*(before|after|lead)|where\s*do\s*(users?|people|visitors?)\s*go/)) {
+    const eventMatch = lower.match(/(?:before|after|around|for)\s+(\w+(?:\s+\w+)?)/);
+    let pathEvent: string | undefined;
+    let pathPage: string | undefined;
+    if (eventMatch) {
+      const term = eventMatch[1].trim();
+      pathEvent = KNOWN_FUNNEL_EVENTS[term] || term.replace(/\s+/g, "_");
+    }
+    const pageMatch = query.match(/(\/[\w\-\/]+)/);
+    if (pageMatch) pathPage = pageMatch[1];
+
+    return {
+      params: { startDate: dateRange.start, endDate: dateRange.end, dimensions: ["pagePath", "eventName"], metrics: ["eventCount", "totalUsers"] },
+      summary_template: "path", chartType: "table", reportType: "path",
+      pathEvent: pathEvent || "job_apply", pathPage,
+    };
+  }
+
+  // ── DYNAMIC DIMENSION/METRIC DETECTION ──
+  // Check if user is asking "show me X by Y" pattern
+  const byPattern = lower.match(/(?:show|get|display|give|what(?:'s| is| are)?)\s+(.+?)\s+(?:by|per|grouped?\s*by|broken?\s*down\s*by|split\s*by|for\s*each)\s+(.+?)(?:\s+(?:for|in|during|over|last|this|from).*)?$/);
+  if (byPattern) {
+    const metricPart = byPattern[1].trim();
+    const dimPart = byPattern[2].trim();
+    const resolvedMetric = resolveMetric(metricPart, metadata || null);
+    const resolvedDim = resolveDimension(dimPart, metadata || null);
+    if (resolvedMetric && resolvedDim) {
+      return {
+        params: {
+          startDate: dateRange.start, endDate: dateRange.end,
+          dimensions: [resolvedDim],
+          metrics: [resolvedMetric, "totalUsers"],
+          orderBy: resolvedMetric, orderDesc: true, limit: 20,
+        },
+        summary_template: "dynamic", chartType: "bar",
+        comparison: wantsComparison,
+      };
+    }
+  }
 
   // ── JOB APPLY ──
   if (lower.match(/job.?appl|apply|applies|application/) && !lower.match(/engag|bounce|traffic|overview/)) {
@@ -680,6 +861,26 @@ export function buildSummary(
           return `${i + 1}. ${name || "Generic"} — ${Number(r.eventCount).toLocaleString()} applies`;
         }).join("\n") +
         `\n\nFull breakdown below:`;
+    }
+
+    case "dynamic": {
+      if (!rows[0]) return `No data for ${period}.`;
+      const dims = Object.keys(rows[0]).filter((k) => typeof rows[0][k] === "string");
+      const mets = Object.keys(rows[0]).filter((k) => typeof rows[0][k] === "number");
+      return `Results for ${period}:\n\n` +
+        rows.slice(0, 5).map((r, i) => {
+          const dimVals = dims.map((d) => r[d]).join(" / ");
+          const metVals = mets.map((m) => `${m}: ${Number(r[m]).toLocaleString()}`).join(", ");
+          return `${i + 1}. ${dimVals} — ${metVals}`;
+        }).join("\n") + `\n\nFull breakdown below:`;
+    }
+
+    case "funnel": {
+      return `Funnel analysis for ${period}. Results below:`;
+    }
+
+    case "path": {
+      return `Path analysis for ${period}. Top user paths below:`;
     }
 
     case "chatbot": {
