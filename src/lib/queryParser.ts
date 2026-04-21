@@ -649,6 +649,38 @@ export function parseQuery(query: string, metadata?: GA4Meta): ParsedQuery {
     };
   }
 
+  // ── TRAFFIC SOURCES (compound — must be checked BEFORE generic traffic) ──
+  if (lower.match(/traffic\s*sources?|source.*traffic/)) {
+    if (wantsGeoBreakdown) {
+      return {
+        params: {
+          startDate: dateRange.start,
+          endDate: dateRange.end,
+          dimensions: ["country"],
+          metrics: ["sessions", "totalUsers", "screenPageViews", "bounceRate"],
+          orderBy: "sessions",
+          orderDesc: true,
+          limit: 20,
+        },
+        summary_template: "geo",
+        chartType: "bar",
+      };
+    }
+    return {
+      params: {
+        startDate: dateRange.start,
+        endDate: dateRange.end,
+        dimensions: ["sessionSourceMedium"],
+        metrics: ["sessions", "totalUsers", "bounceRate"],
+        orderBy: "sessions",
+        orderDesc: true,
+        limit: 15,
+      },
+      summary_template: "sources",
+      chartType: "bar",
+    };
+  }
+
   // ── TRAFFIC / OVERVIEW ──
   if (lower.match(/traffic|overview|how.*doing|dashboard|summary|performance/)) {
     return {
@@ -661,10 +693,9 @@ export function parseQuery(query: string, metadata?: GA4Meta): ParsedQuery {
         orderDesc: wantsGeoBreakdown,
         limit: wantsGeoBreakdown ? 20 : undefined,
       },
-      summary_template: "traffic_overview",
+      summary_template: wantsGeoBreakdown ? "geo" : "traffic_overview",
       chartType: wantsGeoBreakdown ? "bar" : "line",
       comparison: wantsComparison,
-      geoBreakdown: false, // main dimension is already geo when wantsGeoBreakdown is true
     };
   }
 
