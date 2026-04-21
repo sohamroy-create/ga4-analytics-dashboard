@@ -69,12 +69,15 @@ export async function POST(request: Request) {
 
     // Step 0: Check if this is a follow-up query that references previous context
     let effectiveQuery = query;
+    let isContextFollowUp = false;
     if (ctx && isFollowUp(query)) {
       effectiveQuery = mergeWithContext(query, ctx);
+      isContextFollowUp = true; // Skip clarification for follow-ups — user already gave context
     }
 
     // Step 1: Check if we need to ask clarifying questions
-    if (!skipClarification) {
+    // Skip clarification for follow-ups (context already provides the needed info)
+    if (!skipClarification && !isContextFollowUp) {
       const clarification = checkClarification(effectiveQuery);
       if (clarification) {
         return NextResponse.json({
